@@ -31,18 +31,7 @@ def rf_mat(alphas, phis, B1=None):
     inv_ejp = 1 / ejp
 
     RR = torch.stack(
-        [
-            cosa2 + 0j,
-            ejp**2 * sina2,
-            -1j * ejp * sina,
-            inv_ejp**2 * sina2,
-            cosa2 + 0j,
-            1j * inv_ejp * sina,
-            -1j / 2.0 * inv_ejp * sina,
-            1j / 2.0 * ejp * sina,
-            cosa + 0j,
-        ],
-        -1,
+        [cosa2 + 0j, ejp ** 2 * sina2, -1j * ejp * sina, inv_ejp ** 2 * sina2, cosa2 + 0j, 1j * inv_ejp * sina, -1j / 2.0 * inv_ejp * sina, 1j / 2.0 * ejp * sina, cosa + 0j,], -1,
     ).reshape(*alphas.shape, 3, 3)
     return RR
 
@@ -96,6 +85,17 @@ def FSE_TE(FpFmZ, rf_matrix, EE, recovery=True, noadd=False):
     FpFmZ = grad(FpFmZ, noadd)
     FpFmZ = relax(FpFmZ, EE, recovery)
 
+    return FpFmZ
+
+
+def MRF_TR(FpFmZ, rf_matrix, EETE, EETR, noadd=False):
+    """Propagate EPG states through a full MRF TR after an readout, i.e.
+    (readout) -> grad -> decay TR-TE -> rf -> decay TE -> (readout) 
+    """
+    FpFmZ = grad(FpFmZ, noadd)
+    FpFmZ = relax(FpFmZ, EETR, True)
+    FpFmZ = rf(FpFmZ, rf_matrix)
+    FpFmZ = relax(FpFmZ, EETE, True)
     return FpFmZ
 
 
@@ -168,6 +168,38 @@ def FSE_signal(
             relax_matrix = relax_mat(TE[..., i] / 2, T1, T2)
         P = FSE_TE(P, rf_matrix, relax_matrix)
         M[..., i, :] = torch.stack((P[..., 0, 0].real, P[..., 0, 0].imag, P[..., 2, 0].real), -1)
+    return M
+
+
+def MRF_Signal(
+    flipangles: torch.Tensor, flipphases: torch.Tensor, TE: torch.Tensor, TR: torch.Tensor, T1: torch.Tensor, T2: torch.Tensor, TI: torch.Tensor,
+):
+    flipangles, flipphases, TE, TR, T1, T2 = (torch.atleast_1d(i) for i in (flipangles, flipphases, TE, TR, T1, T2))
+    flipangles, flipphases = torch.broadcast_tensors(flipangles, flipphases)
+    shape_pulses = torch.broadcast_shapes(flipangles.shape, flipphases.shape, TE.shape, TR.shape)
+    shape_prop = torch.broadcast_shapes(T1.shape, T2.shape)
+    shape_common = torch.broadcast_shapes(shape_prop, shape_pulses[:-1])
+    batch_sizes = shape_common
+    T = shape_pulses[-1]
+
+    M = torch.zeros(*batch_sizes, T, dtype=torch.cfloat, device=flipangles.device)
+    P = torch.zeros((*batch_sizes, 3, 1), dtype=torch.cfloat, device=flipangles.device)
+
+    P[..., :, 0] = torch.tensor((0.0, 0, -1.0))
+    P = relax(P, relax_mat(TI, T1, T2))
+    for i in range(0, T):
+        if i == 0 or flipangles.shape[-1] > 1:
+            rf_matrix = rf_mat(flipangles[..., i], flipphases[..., i])
+        if i == 0 or TE.shape[-1] > 1:
+            TErelax_matrix = relax_mat(TE[..., i], T1, T2)
+        if i == 0 or TE.shape[-1] > 1 or TR.shape[-1] > 1:
+            TRrelax_matrix = relax_mat((TR - TE)[..., i], T1, T2)
+
+        P = rf(P, rf_matrix)
+        P = relax(P, TErelax_matrix, True)
+        M[..., i] = P[..., 0, 0]
+        P = grad(P, False)
+        P = relax(P, TRrelax_matrix, True)
     return M
 
 
