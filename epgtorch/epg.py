@@ -21,7 +21,7 @@ def rf(FpFmZ, matrix):
 def rf_mat(alphas, phis, B1=None):
     alphas, phis = alphas.moveaxis(-1, 0), phis.moveaxis(-1, 0)
     if B1 is not None:
-        alphas = alphas * B1[None, ...]
+        alphas = alphas * B1
     cosa = torch.cos(alphas)
     sina = torch.sin(alphas)
     cosa2 = (cosa + 1) / 2
@@ -172,24 +172,26 @@ def FSE_signal(
 
 
 def MRF_Signal(
-    flipangles: torch.Tensor, flipphases: torch.Tensor, TE: torch.Tensor, TR: torch.Tensor, T1: torch.Tensor, T2: torch.Tensor, TI: torch.Tensor,
+    flipangles: torch.Tensor, flipphases: torch.Tensor, TE: torch.Tensor, TR: torch.Tensor, T1: torch.Tensor, T2: torch.Tensor, B1: torch.Tensor, TI: torch.Tensor, inv: torch.bool = False
 ):
     flipangles, flipphases, TE, TR, T1, T2 = (torch.atleast_1d(i) for i in (flipangles, flipphases, TE, TR, T1, T2))
-    flipangles, flipphases = torch.broadcast_tensors(flipangles, flipphases)
-    shape_pulses = torch.broadcast_shapes(flipangles.shape, flipphases.shape, TE.shape, TR.shape)
-    shape_prop = torch.broadcast_shapes(T1.shape, T2.shape)
-    shape_common = torch.broadcast_shapes(shape_prop, shape_pulses[:-1])
-    batch_sizes = shape_common
+    shape_pulses = flipangles.shape
+    shape_prop = T1.shape[0]*T2.shape[0]
+    shape_B1 = B1.shape
     T = shape_pulses[-1]
 
-    M = torch.zeros(*batch_sizes, T, dtype=torch.cfloat, device=flipangles.device)
-    P = torch.zeros((*batch_sizes, 3, 1), dtype=torch.cfloat, device=flipangles.device)
+    M = torch.zeros(shape_prop, *shape_B1, T, dtype=torch.cfloat, device=flipangles.device)
+    P = torch.zeros((shape_prop, *shape_B1, 3, 1), dtype=torch.cfloat, device=flipangles.device)
 
-    P[..., :, 0] = torch.tensor((0.0, 0, -1.0))
-    P = relax(P, relax_mat(TI, T1, T2))
+    if inv:
+        P[..., :, 0] = torch.tensor((0.0, 0, -1.0))
+        P = relax(P, relax_mat(TI, T1, T2))
+    else:
+        P[..., :, 0] = torch.tensor((0.0, 0, 1.0))
+
     for i in range(0, T):
         if i == 0 or flipangles.shape[-1] > 1:
-            rf_matrix = rf_mat(flipangles[..., i], flipphases[..., i])
+            rf_matrix = rf_mat(flipangles[..., i], flipphases[..., i], B1)
         if i == 0 or TE.shape[-1] > 1:
             TErelax_matrix = relax_mat(TE[..., i], T1, T2)
         if i == 0 or TE.shape[-1] > 1 or TR.shape[-1] > 1:
@@ -197,7 +199,7 @@ def MRF_Signal(
 
         P = rf(P, rf_matrix)
         P = relax(P, TErelax_matrix, True)
-        M[..., i] = P[..., 0, 0]
+        M[..., i] = P[..., 0, 0]*torch.exp(-1j*flipphases[..., i])
         P = grad(P, False)
         P = relax(P, TRrelax_matrix, True)
     return M
